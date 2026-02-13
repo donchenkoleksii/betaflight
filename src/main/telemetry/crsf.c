@@ -73,6 +73,11 @@
 
 #include "crsf.h"
 
+#ifdef USE_ESC_SENSOR
+#include "sensors/esc_sensor.h"
+#include "flight/mixer.h"
+#endif
+
 #define CRSF_CYCLETIME_US                   100000 // 100ms, 10 Hz
 #define CRSF_DEVICEINFO_VERSION             0x01
 #define CRSF_DEVICEINFO_PARAMETER_COUNT     0
@@ -299,6 +304,33 @@ static void crsfFrameBatterySensor(sbuf_t *dst)
     sbufWriteU8(dst, (uint8_t)mAhDrawn);
     sbufWriteU8(dst, batteryRemainingPercentage);
 }
+
+#ifdef USE_ESC_SENSOR
+static void crsfFrameEscTelemetry(sbuf_t *dst)
+{
+    static uint8_t escIndex = 0;
+    const uint8_t motorCount = getMotorCount();
+    
+    if (motorCount == 0) return;
+    
+    escSensorData_t *escData = getEscSensorData(escIndex);
+    if (!escData || escData->dataAge >= ESC_DATA_INVALID) {
+        escIndex = (escIndex + 1) % motorCount;
+        return;
+    }
+    
+    sbufWriteU8(dst, CRSF_FRAME_ESC_TELEMETRY_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_ESC_TELEMETRY);
+    sbufWriteU8(dst, escIndex);
+    sbufWriteU8(dst, escData->temperature);
+    sbufWriteU16BigEndian(dst, escData->voltage);
+    sbufWriteU16BigEndian(dst, escData->current);
+    sbufWriteU16BigEndian(dst, escData->consumption);
+    sbufWriteU16BigEndian(dst, escData->rpm);
+    
+    escIndex = (escIndex + 1) % motorCount;
+}
+#endif
 
 #if defined(USE_BARO) && defined(USE_VARIO)
 // pack altitude in decimeters into a 16-bit value.
@@ -705,6 +737,7 @@ typedef enum {
     CRSF_FRAME_GPS_INDEX,
     CRSF_FRAME_VARIO_SENSOR_INDEX,
     CRSF_FRAME_HEARTBEAT_INDEX,
+    CRSF_FRAME_ESC_TELEMETRY_INDEX,    // <-- ДОБАВИТЬ
     CRSF_SCHEDULE_COUNT_MAX
 } crsfFrameTypeIndex_e;
 
@@ -797,6 +830,14 @@ static void processCrsf(void)
     }
 #endif
 
+    #ifdef USE_ESC_SENSOR
+    if (currentSchedule & BIT(CRSF_FRAME_ESC_TELEMETRY_INDEX)) {
+        crsfInitializeFrame(dst);
+        crsfFrameEscTelemetry(dst);
+        crsfFinalize(dst);
+    }
+#endif
+    
     crsfScheduleIndex = (crsfScheduleIndex + 1) % crsfScheduleCount;
 }
 
@@ -867,6 +908,12 @@ void initCrsfTelemetry(void)
     }
 #endif
 
+    #ifdef USE_ESC_SENSOR
+    if (featureIsEnabled(FEATURE_ESC_SENSOR)) {
+        crsfSchedule[index++] = BIT(CRSF_FRAME_ESC_TELEMETRY_INDEX);
+    }
+#endif
+    
 #if defined(USE_CRSF_V3)
     while (index < (CRSF_CYCLETIME_US / CRSF_TELEMETRY_FRAME_INTERVAL_MAX_US) && index < CRSF_SCHEDULE_COUNT_MAX) {
         // schedule heartbeat to ensure that telemetry/heartbeat frames are sent at minimum 50Hz
